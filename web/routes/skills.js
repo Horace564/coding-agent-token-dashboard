@@ -32,7 +32,10 @@ export default async function (root) {
   const skills = await api(url);
 
   const totalInvocations = skills.reduce((s, r) => s + r.invocations, 0);
-  const totalSessions = new Set(); // not exact — we'd need another query; skip.
+  const uniqueSkills = new Set(skills.map(r => r.skill)).size;
+  const sourceNote = state.source === 'codex' ? 'Codex uses inferred from SKILL.md reads'
+    : state.source === 'claude' ? 'Claude Code Skill tool calls'
+    : 'Claude Code Skill calls and inferred Codex SKILL.md reads';
 
   const rangeTabs = `
     <div class="range-tabs" role="tablist">
@@ -42,29 +45,30 @@ export default async function (root) {
   root.innerHTML = `
     <div class="flex" style="margin-bottom:14px">
       <h2 style="margin:0;font-size:16px;letter-spacing:-0.01em">Skills</h2>
-      <span class="muted" style="font-size:12px">${state.source === 'codex' ? 'Codex skill usage is not available yet' : 'Claude Code skills'}</span>
+      <span class="muted" style="font-size:12px">${sourceNote}</span>
       <span class="muted" style="font-size:12px">${range.days ? `last ${range.days} days` : 'all time'}</span>
       <div class="spacer"></div>
       ${rangeTabs}
     </div>
 
     <div class="row cols-2">
-      <div class="card kpi"><div class="label">Unique skills used</div><div class="value">${fmt.int(skills.length)}</div></div>
-      <div class="card kpi"><div class="label">Total invocations</div><div class="value">${fmt.int(totalInvocations)}</div></div>
+      <div class="card kpi"><div class="label">Unique skills used</div><div class="value">${fmt.int(uniqueSkills)}</div></div>
+      <div class="card kpi"><div class="label">Observed uses</div><div class="value">${fmt.int(totalInvocations)}</div></div>
     </div>
 
     <div class="card" style="margin-top:16px">
-      <h3>Top skills (by invocations)</h3>
+      <h3>Top skills (by uses)</h3>
       <div id="ch-skills" style="height:320px"></div>
     </div>
 
     <div class="card" style="margin-top:16px">
       <h3>All skills</h3>
-      <p class="muted" style="margin:-4px 0 14px;font-size:12px">"Tokens per call" is the size of the skill's <code>SKILL.md</code> file — what Claude Code loads into context each time the skill is invoked.</p>
+      <p class="muted" style="margin:-4px 0 14px;font-size:12px">"Tokens per call" estimates the size of a local <code>SKILL.md</code> file; it is not measured token usage. Codex counts one read per skill per turn.</p>
       <table>
         <thead><tr>
           <th>skill</th>
-          <th class="num">invocations</th>
+          <th>source</th>
+          <th class="num">uses</th>
           <th class="num">tokens per call</th>
           <th class="num">sessions</th>
           <th>last used</th>
@@ -73,11 +77,12 @@ export default async function (root) {
           ${skills.map(s => `
             <tr>
               <td><span class="badge">${fmt.htmlSafe(s.skill)}</span></td>
+              <td>${s.source === 'codex' ? 'Codex (inferred)' : 'Claude Code'}</td>
               <td class="num">${fmt.int(s.invocations)}</td>
               <td class="num">${s.tokens_per_call == null ? '<span class="muted">—</span>' : fmt.int(s.tokens_per_call)}</td>
               <td class="num">${fmt.int(s.sessions)}</td>
               <td class="mono">${fmt.ts(s.last_used)}</td>
-            </tr>`).join('') || '<tr><td colspan="5" class="muted">no skills invoked in this range</td></tr>'}
+            </tr>`).join('') || '<tr><td colspan="6" class="muted">no skills invoked in this range</td></tr>'}
         </tbody>
       </table>
     </div>
@@ -89,7 +94,10 @@ export default async function (root) {
 
   const top = skills.slice(0, 12);
   barChart(document.getElementById('ch-skills'), {
-    categories: top.map(t => t.skill.length > 26 ? t.skill.slice(0, 25) + '…' : t.skill),
+    categories: top.map(t => {
+      const label = state.source === 'all' ? `${t.skill} (${t.source})` : t.skill;
+      return label.length > 26 ? label.slice(0, 25) + '…' : label;
+    }),
     values: top.map(t => t.invocations),
     color: '#3FB68B',
   });

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
 import sqlite3
 import time
 from contextlib import closing
@@ -110,6 +111,32 @@ def _preview(value, limit=12000) -> tuple[str | None, bool]:
 def _item_turn(payload: dict, current_turn: str | None) -> str | None:
     metadata = payload.get("internal_chat_message_metadata_passthrough") or {}
     return metadata.get("turn_id", current_turn) if isinstance(metadata, dict) else current_turn
+
+
+_COMMAND_RE = re.compile(
+    r"""(?:\bcmd|["']cmd["'])\s*:\s*(?:"(?P<double>(?:\\.|[^"\\])*)"|'(?P<single>(?:\\.|[^'\\])*)')"""
+)
+_READ_COMMAND_RE = re.compile(
+    r"(?:^|[;&|{]\s*)\s*(?:Get-Content|cat|sed|head|tail|more|less)\b", re.I,
+)
+_SKILL_PATH_RE = re.compile(r"([A-Za-z0-9_.-]+)[\\/]+SKILL\.md\b", re.I)
+
+
+def _skill_reads(tool_input) -> set[str]:
+    """Infer activation only when a shell command reads a SKILL.md file."""
+    if isinstance(tool_input, dict):
+        commands = [tool_input.get("cmd")]
+    elif isinstance(tool_input, str):
+        commands = [m.group("double") or m.group("single") for m in _COMMAND_RE.finditer(tool_input)]
+        if not commands:
+            commands = [tool_input]
+    else:
+        return set()
+    return {
+        match.group(1)
+        for command in commands if isinstance(command, str) and _READ_COMMAND_RE.search(command)
+        for match in _SKILL_PATH_RE.finditer(command)
+    }
 
 
 def _session_titles(codex_home: Path) -> dict[str, str]:
@@ -361,7 +388,7 @@ def scan_codex_dir(sessions_root: Union[str, Path], db_path: Union[str, Path]) -
     titles = _session_titles(root.parent)
     with connect(db_path) as conn:
         version = conn.execute("SELECT version FROM scanner_state WHERE source='codex'").fetchone()
-        rebuild = version is None or version[0] != 3
+        rebuild = version is None or version[0] != 4
         for sid, title in titles.items():
             conn.execute("INSERT OR REPLACE INTO session_titles (session_id, title) VALUES (?, ?)", (sid, title))
         for path in root.rglob("*.jsonl"):
@@ -374,8 +401,23 @@ def scan_codex_dir(sessions_root: Union[str, Path], db_path: Union[str, Path]) -
                 continue
             rows = parse_file(path)
             conn.execute("DELETE FROM messages WHERE source='codex' AND source_file=?", (str(path),))
+            conn.execute("DELETE FROM codex_skill_uses WHERE source_file=?", (str(path),))
             for row in rows:
                 conn.execute(INSERT, row)
+                if row["type"] != "assistant" or not row["activity_json"]:
+                    continue
+                for event in json.loads(row["activity_json"]):
+                    if event.get("kind") != "tool":
+                        continue
+                    for skill in _skill_reads(event.get("input")):
+                        conn.execute("""
+                            INSERT OR IGNORE INTO codex_skill_uses
+                              (source_file, turn_uuid, session_id, project_slug, skill, timestamp)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        """, (
+                            str(path), row["parent_uuid"] or row["uuid"], row["session_id"],
+                            row["project_slug"], skill, event.get("timestamp") or row["timestamp"],
+                        ))
             conn.execute(
                 "INSERT OR REPLACE INTO files (path, mtime, bytes_read, scanned_at) VALUES (?, ?, ?, ?)",
                 (str(path), stat.st_mtime, stat.st_size, time.time()),
@@ -383,6 +425,6 @@ def scan_codex_dir(sessions_root: Union[str, Path], db_path: Union[str, Path]) -
             totals["files"] += 1
             totals["messages"] += sum(row["type"] == "assistant" for row in rows)
             totals["turns"] += sum(row["type"] == "user" for row in rows)
-        conn.execute("INSERT OR REPLACE INTO scanner_state (source, version) VALUES ('codex', 3)")
+        conn.execute("INSERT OR REPLACE INTO scanner_state (source, version) VALUES ('codex', 4)")
         conn.commit()
     return totals

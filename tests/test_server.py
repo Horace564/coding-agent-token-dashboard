@@ -41,15 +41,16 @@ class ServerTests(unittest.TestCase):
         return urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}").read()
 
     def test_index_html(self):
-        body = self._get("/")
-        self.assertIn(b"Token Dashboard", body)
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/") as response:
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+            self.assertIn(b"Token Dashboard", response.read())
 
     def test_overview_json(self):
         body = json.loads(self._get("/api/overview"))
         self.assertIn("sessions", body)
         self.assertEqual(body["sessions"], 1)
 
-    def test_source_filter_and_codex_cost(self):
+    def test_source_filter(self):
         with sqlite3.connect(self.db) as c:
             c.execute("""INSERT INTO messages
                 (uuid, source, session_id, project_slug, type, timestamp, model,
@@ -62,9 +63,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(claude["sessions"], 1)
         self.assertEqual(codex["sessions"], 1)
         self.assertEqual(codex["input_tokens"], 6)
-        self.assertIsNone(codex["cost_usd"])
         self.assertEqual(combined["sessions"], 2)
-        self.assertTrue(combined["cost_partial"])
         self.assertEqual(json.loads(self._get("/api/projects?source=codex"))[0]["source"], "codex")
         turns = json.loads(self._get("/api/sessions/codex%3Az"))
         self.assertEqual(turns[0]["source"], "codex")
@@ -73,15 +72,30 @@ class ServerTests(unittest.TestCase):
         body = json.loads(self._get("/api/prompts?limit=10"))
         self.assertIsInstance(body, list)
 
+    def test_tools_json_includes_codex_activity(self):
+        with sqlite3.connect(self.db) as c:
+            c.execute("""INSERT INTO messages
+                (uuid, source, session_id, project_slug, type, timestamp, activity_json)
+                VALUES ('tool', 'codex', 'codex:t', 'p', 'assistant',
+                        '2026-04-19T00:00:02Z', ?)""", (
+                '[{"kind":"tool","name":"exec_command"}]',
+            ))
+        rows = json.loads(self._get("/api/tools?source=codex"))
+        self.assertEqual(rows, [{"source": "codex", "tool_name": "exec_command", "calls": 1, "sessions": 1}])
+
+    def test_sessions_token_sort(self):
+        with sqlite3.connect(self.db) as c:
+            c.execute("""INSERT INTO messages
+                (uuid, session_id, project_slug, type, timestamp, input_tokens)
+                VALUES ('older-heavy', 'heavy', 'p', 'assistant',
+                        '2026-04-18T00:00:00Z', 100)""")
+        rows = json.loads(self._get("/api/sessions?sort=tokens&limit=1"))
+        self.assertEqual([row["session_id"] for row in rows], ["heavy"])
+
     def test_projects_json(self):
         body = json.loads(self._get("/api/projects"))
         self.assertIsInstance(body, list)
         self.assertEqual(body[0]["project_slug"], "p")
-
-    def test_plan_json(self):
-        body = json.loads(self._get("/api/plan"))
-        self.assertIn("plan", body)
-        self.assertIn("pricing", body)
 
     def test_head_returns_200_not_501(self):
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}/", method="HEAD")

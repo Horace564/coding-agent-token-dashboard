@@ -4,11 +4,11 @@ export const $  = (sel, root=document) => root.querySelector(sel);
 export const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
 
 const COMPACT = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
+const MILLIONS = new Intl.NumberFormat('en', { maximumSignificantDigits: 3 });
 export const fmt = {
   int:   n => (n ?? 0).toLocaleString(),
   compact: n => COMPACT.format(n ?? 0),
-  usd:   n => n == null ? '—' : '$' + Number(n).toFixed(2),
-  usd4:  n => n == null ? '—' : '$' + Number(n).toFixed(4),
+  million: n => `${MILLIONS.format((n || 0) / 1_000_000)}M`,
   pct:   n => n == null ? '—' : (n * 100).toFixed(0) + '%',
   short: (s, n=80) => s == null ? '' : (s.length > n ? s.slice(0, n - 1) + '…' : s),
   htmlSafe: s => (s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),
@@ -32,16 +32,13 @@ export async function api(path, opts) {
   return r.json();
 }
 
-export const state = { plan: 'api', pricing: null, source: localStorage.getItem('td.source') || 'all' };
+export const state = { source: localStorage.getItem('td.source') || 'all' };
 
 const ROUTES = {
   '/overview': () => import('/web/routes/overview.js'),
   '/prompts':  () => import('/web/routes/prompts.js'),
   '/sessions': () => import('/web/routes/sessions.js'),
-  '/projects': () => import('/web/routes/projects.js'),
   '/skills':   () => import('/web/routes/skills.js'),
-  '/tips':     () => import('/web/routes/tips.js'),
-  '/settings': () => import('/web/routes/settings.js'),
 };
 
 function buildTopbar() {
@@ -58,7 +55,6 @@ function buildTopbar() {
       <option value="claude">Claude Code</option>
       <option value="codex">Codex</option>
     </select>
-    <span class="pill" id="plan-pill">api</span>
     <span class="pill muted" title="Cmd/Ctrl+B blurs sensitive text">⌘B blur</span>
   `;
   document.body.prepend(wrap);
@@ -73,8 +69,9 @@ async function render() {
   const path = hash.split('?')[0];
   let key = path;
   if (path.startsWith('/sessions/')) key = '/sessions';
+  if (!ROUTES[key]) key = '/overview';
   setActiveTab(key);
-  const loader = ROUTES[key] || ROUTES['/overview'];
+  const loader = ROUTES[key];
   const mod = await loader();
   $('#app').innerHTML = '';
   try {
@@ -82,34 +79,6 @@ async function render() {
   } catch (e) {
     $('#app').innerHTML = `<div class="card"><h2>Error</h2><pre>${fmt.htmlSafe(String(e.stack || e))}</pre></div>`;
   }
-}
-
-async function firstRun() {
-  if (localStorage.getItem('td.plan-set')) return;
-  const plans = Object.entries(state.pricing.plans);
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.innerHTML = `
-    <div class="modal">
-      <h2>Welcome — pick your plan</h2>
-      <p>This sets how costs are displayed. Change it later in Settings.</p>
-      <select id="firstplan" style="width:100%">
-        ${plans.map(([k,v]) => `<option value="${k}">${v.label}${v.monthly ? ` — $${v.monthly}/mo` : ''}</option>`).join('')}
-      </select>
-      <div class="actions">
-        <div class="spacer"></div>
-        <button class="primary" id="firstsave">Continue</button>
-      </div>
-    </div>`;
-  document.body.appendChild(overlay);
-  await new Promise(res => $('#firstsave', overlay).addEventListener('click', async () => {
-    const plan = $('#firstplan', overlay).value;
-    await fetch('/api/plan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ plan }) });
-    localStorage.setItem('td.plan-set', '1');
-    overlay.remove();
-    res();
-  }));
-  state.plan = (await api('/api/plan')).plan;
 }
 
 async function boot() {
@@ -121,13 +90,6 @@ async function boot() {
     localStorage.setItem('td.source', state.source);
     render();
   });
-  const planResp = await api('/api/plan');
-  state.plan = planResp.plan;
-  state.pricing = planResp.pricing;
-  $('#plan-pill').textContent = state.plan;
-
-  await firstRun();
-
   window.addEventListener('hashchange', render);
   await render();
 
@@ -142,9 +104,17 @@ async function boot() {
   // SSE diff stream
   try {
     const es = new EventSource('/api/stream');
+    let serverInstance = null;
     es.onmessage = ev => {
       try {
         const evt = JSON.parse(ev.data);
+        if (evt.type === 'server') {
+          if (serverInstance !== null && serverInstance !== evt.instance) {
+            location.reload();
+            return;
+          }
+          serverInstance = evt.instance;
+        }
         if (evt.type === 'scan') render();
       } catch {}
     };

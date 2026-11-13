@@ -4,13 +4,13 @@ Guidance for Claude Code when working in this repository.
 
 ## Project overview
 
-**Token Dashboard** — a local dashboard for Claude Code and Codex token usage, prompts, and session history. Claude Code also provides tool, skill, and tips analytics. Codex imports user prompts but not assistant or tool output.
+**Coding Agent Token Dashboard** — a local dashboard for Claude Code and Codex token usage, prompts, session history, visible tool activity, and skills. Codex skill counts are inferred from recorded reads of `SKILL.md`.
 
-Inspired by [phuryn/claude-usage](https://github.com/phuryn/claude-usage) but diverges in UI (vanilla JS + ECharts, dark theme, hash router, SSE refresh) and scope (expensive-prompt drill-down, skills view, tips engine, streaming-snapshot dedup). See `docs/inspiration.md` for the original's feature set and known limitations.
+The fork attribution is in `README.md` under Acknowledgements. `docs/inspiration.md` records earlier inspiration and design context.
 
 ## Status
 
-Working codebase. Python unit tests run with `python3 -m unittest discover tests`. Seven UI tabs wired up (Overview, Prompts, Sessions, Projects, Skills, Tips, Settings). Runs on macOS, Windows, and Linux.
+Working codebase. Python unit tests run with `python3 -m unittest discover tests`. Five UI tabs are wired up (Overview, Prompts, Sessions, Projects, Skills). Runs on macOS, Windows, and Linux.
 
 ## Architecture
 
@@ -22,7 +22,7 @@ Working codebase. Python unit tests run with `python3 -m unittest discover tests
 
 Claude Code writes one JSONL file per session to `~/.claude/projects/<project-slug>/<session-id>.jsonl`. Each line is a message record; usage fields live at `message.usage` and model identifier at `message.model`. The scanner is incremental — it tracks each file's mtime and byte offset in the `files` table and only reads new bytes on subsequent scans.
 
-Codex rollout files are read from `$CODEX_HOME/sessions` (default `~/.codex/sessions`). The Codex adapter prefers per-response `token_usage_record` data and falls back to legacy `event_msg.token_count` snapshots. It imports user prompts from message records, reads session names from the local index or state database, and rescans changed rollout files. Its on-disk format is not a stable public API.
+Codex rollout files are read from `$CODEX_HOME/sessions` (default `~/.codex/sessions`). The Codex adapter prefers per-response `token_usage_record` data and falls back to legacy `event_msg.token_count` snapshots. It imports user prompts and bounded previews of visible assistant and tool activity, reads session names from the local index or state database, and rescans changed rollout files. Its on-disk format is not a stable public API.
 
 ## Conventions
 
@@ -34,11 +34,11 @@ Codex rollout files are read from `$CODEX_HOME/sessions` (default `~/.codex/sess
 
 ## Customizing
 
-Env vars: `PORT` (default 8080), `HOST` (default 127.0.0.1), `CLAUDE_PROJECTS_DIR`, `CODEX_HOME`, `CODEX_SESSIONS_DIR`, `TOKEN_DASHBOARD_DB`. Claude pricing lives in `pricing.json`. See README.md § Environment variables for details.
+Env vars: `PORT` (default 8080), `HOST` (default 127.0.0.1), `CLAUDE_PROJECTS_DIR`, `CODEX_HOME`, `CODEX_SESSIONS_DIR`, `TOKEN_DASHBOARD_DB`. See README.md § Configuration for details.
 
 ## Known limitations
 
-See `docs/KNOWN_LIMITATIONS.md`. Current summary: Skills `tokens_per_call` is populated only for skills installed under the three scanned roots (`~/.claude/skills/`, `~/.claude/scheduled-tasks/`, `~/.claude/plugins/`); project-local skills and subagent-dispatched skills show invocation counts but blank token counts.
+See `docs/KNOWN_LIMITATIONS.md`. Skill file token estimates depend on whether the skill is found in the scanned local directories; Codex skill counts are inferred from recorded file reads.
 
 ## Verifying changes
 

@@ -12,22 +12,19 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 from .db import (
     overview_totals, expensive_prompts, project_summary,
-    tool_token_breakdown, recent_sessions, session_turns,
+    tool_use_breakdown, recent_sessions, session_turns,
     daily_token_breakdown, model_breakdown, skill_breakdown,
 )
-from .pricing import load_pricing, cost_for, get_plan, set_plan
-from .tips import all_tips, dismiss_tip
 from .scanner import scan_dir
 from .codex_scanner import default_codex_sessions_dir, scan_codex_dir
 from .skills import cached_catalog
 
 
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
-PRICING_JSON = Path(__file__).resolve().parent.parent / "pricing.json"
 
 EVENTS: "queue.Queue[dict]" = queue.Queue()
+SERVER_INSTANCE = str(time.time_ns())
 
-MAX_POST_BYTES = 1_000_000  # 1 MB — we only accept tiny JSON bodies (plan, tip key)
 MAX_LIMIT = 1000
 
 
@@ -65,12 +62,12 @@ def _serve_static(handler, rel: str) -> None:
     handler.send_response(200)
     handler.send_header("Content-Type", ctype or "application/octet-stream")
     handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Cache-Control", "no-store")
     handler.end_headers()
     handler.wfile.write(body)
 
 
 def build_handler(db_path: str, projects_dir: str, codex_dir: str = None):
-    pricing = load_pricing(PRICING_JSON)
     codex_dir = codex_dir or str(default_codex_sessions_dir())
 
     class H(http.server.BaseHTTPRequestHandler):
@@ -95,38 +92,22 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: str = None):
             if path.startswith("/web/"):
                 return _serve_static(self, path[5:])
             if path == "/api/overview":
-                totals = overview_totals(db_path, since, until, source)
-                cost_usd = 0.0
-                models = model_breakdown(db_path, since, until, source)
-                for m in models:
-                    if m["source"] != "claude":
-                        continue
-                    c = cost_for(m["model"], m, pricing)
-                    if c["usd"] is not None:
-                        cost_usd += c["usd"]
-                totals["cost_usd"] = None if source == "codex" else round(cost_usd, 4)
-                totals["cost_partial"] = source == "codex" or any(m["source"] == "codex" for m in models)
-                return _send_json(self, totals)
+                return _send_json(self, overview_totals(db_path, since, until, source))
             if path == "/api/prompts":
                 limit = _clamp_limit(qs.get("limit", ["50"])[0], 50)
                 sort = qs.get("sort", ["tokens"])[0]
-                rows = expensive_prompts(db_path, limit=limit, sort=sort, source=source)
-                for r in rows:
-                    c = cost_for(r["model"], {
-                        "input_tokens": 0, "output_tokens": 0,
-                        "cache_read_tokens": r["cache_read_tokens"],
-                        "cache_create_5m_tokens": 0, "cache_create_1h_tokens": 0,
-                    }, pricing)
-                    r["estimated_cost_usd"] = c["usd"]
-                return _send_json(self, rows)
+                return _send_json(self, expensive_prompts(db_path, limit=limit, sort=sort, source=source))
             if path == "/api/projects":
                 return _send_json(self, project_summary(db_path, since, until, source))
             if path == "/api/tools":
-                return _send_json(self, tool_token_breakdown(db_path, since, until, source))
+                return _send_json(self, tool_use_breakdown(db_path, since, until, source))
             if path == "/api/sessions":
+                sort = qs.get("sort", ["recent"])[0]
+                if sort not in ("recent", "tokens"):
+                    return _send_error(self, 400, "invalid session sort")
                 return _send_json(self, recent_sessions(
                     db_path, limit=_clamp_limit(qs.get("limit", ["20"])[0], 20),
-                    since=since, until=until, source=source,
+                    since=since, until=until, source=source, sort=sort,
                 ))
             if path == "/api/daily":
                 return _send_json(self, daily_token_breakdown(db_path, since, until, source))
@@ -138,19 +119,10 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: str = None):
                     r["tokens_per_call"] = info["tokens"] if info else None
                 return _send_json(self, rows)
             if path == "/api/by-model":
-                rows = model_breakdown(db_path, since, until, source)
-                for r in rows:
-                    c = cost_for(r["model"], r, pricing) if r["source"] == "claude" else None
-                    r["cost_usd"] = c["usd"] if c else None
-                    r["cost_estimated"] = c["estimated"] if c else True
-                return _send_json(self, rows)
+                return _send_json(self, model_breakdown(db_path, since, until, source))
             if path.startswith("/api/sessions/"):
                 sid = unquote(path.rsplit("/", 1)[1])
                 return _send_json(self, session_turns(db_path, sid))
-            if path == "/api/tips":
-                return _send_json(self, [] if source == "codex" else all_tips(db_path))
-            if path == "/api/plan":
-                return _send_json(self, {"plan": get_plan(db_path), "pricing": pricing})
             if path == "/api/scan":
                 claude = scan_dir(projects_dir, db_path)
                 codex = scan_codex_dir(codex_dir, db_path)
@@ -161,6 +133,11 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: str = None):
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("Connection", "keep-alive")
                 self.end_headers()
+                try:
+                    self.wfile.write(f"data: {json.dumps({'type': 'server', 'instance': SERVER_INSTANCE})}\n\n".encode())
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    return
                 while True:
                     try:
                         evt = EVENTS.get(timeout=15)
@@ -172,29 +149,6 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: str = None):
                         self.wfile.flush()
                     except (BrokenPipeError, ConnectionResetError):
                         return
-            self.send_response(404)
-            self.end_headers()
-
-        def do_POST(self):
-            url = urlparse(self.path)
-            try:
-                length = int(self.headers.get("Content-Length") or 0)
-            except ValueError:
-                return _send_error(self, 400, "invalid Content-Length")
-            if length < 0 or length > MAX_POST_BYTES:
-                return _send_error(self, 413, f"body too large (max {MAX_POST_BYTES} bytes)")
-            try:
-                body = json.loads(self.rfile.read(length) or b"{}") if length else {}
-            except json.JSONDecodeError:
-                return _send_error(self, 400, "invalid JSON")
-            if not isinstance(body, dict):
-                return _send_error(self, 400, "body must be a JSON object")
-            if url.path == "/api/plan":
-                set_plan(db_path, body.get("plan", "api"))
-                return _send_json(self, {"ok": True})
-            if url.path == "/api/tips/dismiss":
-                dismiss_tip(db_path, body.get("key", ""))
-                return _send_json(self, {"ok": True})
             self.send_response(404)
             self.end_headers()
 

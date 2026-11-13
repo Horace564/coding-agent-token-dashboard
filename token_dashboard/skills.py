@@ -20,6 +20,10 @@ _DEFAULT_ROOTS = [
     Path.home() / ".claude" / "skills",
     Path.home() / ".claude" / "scheduled-tasks",
     Path.home() / ".claude" / "plugins",
+    Path.home() / ".codex" / "skills",
+    Path.home() / ".codex" / "plugins" / "cache",
+    Path.home() / ".agents" / "skills",
+    Path.cwd() / ".codex" / "skills",
 ]
 
 

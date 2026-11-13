@@ -1,4 +1,5 @@
 import { api, fmt } from '/web/app.js';
+import { buildPromptTimeline, renderTurn } from '/web/routes/sessions.js';
 
 const SORTS = [
   { key: 'tokens', label: 'Most tokens' },
@@ -20,14 +21,13 @@ function writeSort(key) {
 export default async function (root) {
   const sort = readSort();
   const rows = await api('/api/prompts?limit=100&sort=' + encodeURIComponent(sort.key));
-
+  const sessionCache = new Map();
+  const sessionContext = row => `${row.source === 'codex' ? 'Codex' : 'Claude'} · ${row.session_title || row.session_id.replace(/^codex:/, '').slice(0, 8)}`;
   const sortTabs = `
     <div class="range-tabs" role="tablist">
       ${SORTS.map(s => `<button data-sort="${s.key}" class="${s.key === sort.key ? 'active' : ''}">${s.label}</button>`).join('')}
     </div>`;
-
-  const subtitle = `${sort.key === 'recent' ? 'Latest prompts' : 'Prompts with the most processed tokens'}. `
-    + 'Totals sum every model call in a turn; cache reads are included and a turn can exceed one context window. Click a row to see the full prompt.';
+  const subtitle = sort.key === 'recent' ? 'Latest prompts' : 'Prompts with the most processed tokens';
 
   root.innerHTML = `
     <div class="flex" style="margin-bottom:14px">
@@ -35,62 +35,65 @@ export default async function (root) {
       <div class="spacer"></div>
       ${sortTabs}
     </div>
-
     <div class="card">
-      <p class="muted" style="margin:0 0 14px">${subtitle}</p>
-      <table id="prompts">
-        <thead><tr>
-          <th>${sort.key === 'recent' ? 'when' : 'cache cost'}</th>
-          <th>prompt</th>
-          <th>model</th>
-          <th class="num">calls</th>
-          <th class="num">excl. cache rd</th>
-          <th class="num">cache rd</th>
-          <th class="num">total tokens</th>
-          <th>session</th>
-        </tr></thead>
-        <tbody>
-          ${rows.map((r,i) => `
-            <tr data-i="${i}" style="cursor:pointer">
-              <td class="${sort.key === 'recent' ? 'mono' : 'num mono'}">${sort.key === 'recent' ? fmt.ts(r.timestamp) : fmt.usd4(r.estimated_cost_usd)}</td>
-              <td class="blur-sensitive">${fmt.htmlSafe(fmt.short(r.prompt_text, 110))}</td>
-              <td><span class="badge ${fmt.modelClass(r.model)}">${fmt.htmlSafe(fmt.modelShort(r.model))}</span></td>
-              <td class="num">${fmt.int(r.model_calls)}</td>
-              <td class="num">${fmt.int(r.billable_tokens)}</td>
-              <td class="num">${fmt.int(r.cache_read_tokens)}</td>
-              <td class="num">${fmt.int(r.total_tokens)}</td>
-              <td><a href="#/sessions/${encodeURIComponent(r.session_id)}" onclick="event.stopPropagation()">${fmt.htmlSafe(r.session_title || r.session_id.replace(/^codex:/, '').slice(0,8))}</a></td>
-            </tr>`).join('') || '<tr><td colspan="8" class="muted">no prompts yet</td></tr>'}
-        </tbody>
-      </table>
-    </div>
-    <div id="drawer"></div>
-  `;
+      <p class="muted" style="margin:0 0 14px">${subtitle}. Totals include every model call and cache read in a prompt. Expand a prompt to see its calls, tools, and token breakdown.</p>
+      <div class="session-turn-list">
+        ${rows.map((row, index) => renderTurn({
+          prompt: { uuid: row.user_uuid, timestamp: row.timestamp, prompt_text: row.prompt_text },
+          number: null,
+          stats: {
+            calls: row.model_calls, tools: row.tool_count,
+            compact: row.compaction_count, tokens: row.total_tokens,
+          },
+          detailRows: [],
+        }, new Map(), {
+          label: 'prompt',
+          time: fmt.ts(row.timestamp).slice(5),
+          context: sessionContext(row),
+          detailHtml: '<span class="muted">Loading details…</span>',
+          index,
+        })).join('') || '<p class="muted">No prompts yet.</p>'}
+      </div>
+    </div>`;
 
   root.querySelectorAll('.range-tabs button').forEach(btn => {
     btn.addEventListener('click', () => writeSort(btn.dataset.sort));
   });
 
-  root.querySelectorAll('#prompts tbody tr').forEach(tr => {
-    tr.addEventListener('click', () => {
-      const r = rows[Number(tr.dataset.i)];
-      const drawer = document.getElementById('drawer');
-      drawer.innerHTML = `
-        <div class="card">
-          <h3 style="display:flex;align-items:center">
-            <span>Prompt detail</span>
-            <span class="spacer"></span>
-            <span class="badge ${fmt.modelClass(r.model)}">${fmt.htmlSafe(fmt.modelShort(r.model))}</span>
-          </h3>
-          <pre class="blur-sensitive">${fmt.htmlSafe(r.prompt_text || '')}</pre>
-          <div class="flex" style="margin-top:12px;flex-wrap:wrap;gap:14px">
-            <span class="muted">${fmt.ts(r.timestamp)}</span>
-            <span class="muted">${fmt.int(r.model_calls)} calls · ${fmt.int(r.total_tokens)} total tokens (${fmt.int(r.billable_tokens)} excluding cache reads + ${fmt.int(r.cache_read_tokens)} cache reads)${r.estimated_cost_usd == null ? '' : ` · ~${fmt.usd4(r.estimated_cost_usd)} cache cost`}</span>
-            <span class="spacer"></span>
-            <a href="#/sessions/${encodeURIComponent(r.session_id)}">Open session →</a>
-          </div>
-        </div>`;
-      drawer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  root.querySelectorAll('.session-turn[data-i]').forEach(details => {
+    details.addEventListener('toggle', async () => {
+      if (!details.open || details.dataset.loaded || details.dataset.loading) return;
+      details.dataset.loading = '1';
+      const row = rows[Number(details.dataset.i)];
+      const body = details.querySelector('.session-turn-detail');
+      try {
+        if (!sessionCache.has(row.session_id)) {
+          sessionCache.set(row.session_id, api('/api/sessions/' + encodeURIComponent(row.session_id)));
+        }
+        const timeline = buildPromptTimeline(await sessionCache.get(row.session_id));
+        const entry = timeline.byPromptId.get(row.user_uuid);
+        if (!entry) throw new Error('Prompt not found in session');
+        if (!details.isConnected || !details.open) {
+          delete details.dataset.loading;
+          return;
+        }
+        const updated = document.createElement('div');
+        updated.innerHTML = renderTurn(entry, timeline.callNumbers, {
+          label: 'prompt',
+          time: fmt.ts(row.timestamp).slice(5),
+          context: sessionContext(row),
+          sessionId: row.session_id,
+          index: Number(details.dataset.i),
+        });
+        const replacement = updated.firstElementChild;
+        replacement.open = true;
+        replacement.dataset.loaded = '1';
+        details.replaceWith(replacement);
+      } catch (error) {
+        sessionCache.delete(row.session_id);
+        body.innerHTML = `<span class="muted">Could not load details: ${fmt.htmlSafe(String(error))}. Close and reopen to retry.</span>`;
+        delete details.dataset.loading;
+      }
     });
   });
 }

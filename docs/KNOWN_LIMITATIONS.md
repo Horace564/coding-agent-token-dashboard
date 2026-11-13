@@ -2,27 +2,19 @@
 
 ## Codex imports local usage only
 
-The Codex importer reads local rollout JSONL under `$CODEX_HOME/sessions`. Cloud sessions or other devices are not included. Codex's rollout format is not a stable public API. The dashboard imports token counts, model, project, session names, and user prompts, but currently leaves Codex tools, skills, tips, and dollar cost unavailable. Changed Codex files are reparsed in full so per-response and cumulative records cannot be counted twice.
+The Codex importer reads local rollout JSONL under `$CODEX_HOME/sessions`. Cloud sessions or other devices are not included. Codex's rollout format is not a stable public API. The dashboard imports token counts, model, project, session names, prompts, and visible tool activity. Codex Skills counts are inferred from shell commands that read `SKILL.md`, so preloaded or externally provided skills and reads through other tools may be missed. The general tools breakdown remains unavailable for Codex. Changed Codex files are reparsed in full so per-response and cumulative records cannot be counted twice.
 
 None of these are blockers — the dashboard still gives you useful information. They're the rough edges you'll notice if you look hard.
 
 ## Skills token counts are partial
 
-The Skills route shows every skill Claude Code invoked, how many times, across how many sessions, and when. The **tokens-per-call** column is populated only for skills whose `SKILL.md` lives under `~/.claude/skills/`, `~/.claude/scheduled-tasks/`, or `~/.claude/plugins/`. Skills registered elsewhere (project-local `.claude/skills/`, or invocations that go through the `Task` tool with a skill-shaped `subagent_type`) show invocation counts but leave the token column blank.
+The Skills route shows Claude Code Skill calls and inferred Codex skill reads, their counts, sessions, and last use. Codex counts each skill at most once per user turn. The **tokens-per-call** column estimates the size of `SKILL.md` for skills found under Claude or Codex user/plugin directories, `~/.agents/skills/`, or the current project's `.codex/skills/`. Skills registered elsewhere (such as another project's local skills) show invocation counts but leave this column blank.
 
-It's still a useful view — you can see which skills dominate your session time — just don't expect a complete per-skill token cost. PRs to broaden the catalog scan welcome.
-
-## Cost for Pro / Max / Max-20x users is shown as API-equivalent, not subscription value
-
-The Settings route lets you select your pricing plan, but the Overview cost number is always the API-equivalent (what the same usage would have cost on pay-per-token rates). If you're on Pro you pay a flat $20/month regardless of how much of that API-equivalent number you rack up. We don't do "subscription ROI" math yet — Anthropic doesn't publish per-plan rate limits as public JSON, and faking it would be worse than not doing it.
+This column is an approximate file size, not the actual tokens consumed by a skill invocation.
 
 ## Cowork sessions are invisible
 
 If you use Claude's Cowork mode (server-side sessions, not local `claude` CLI), those sessions don't write JSONL to `~/.claude/projects/` and the dashboard can't see them.
-
-## Non-standard model names get tier-fallback pricing
-
-If a transcript references a model ID not in `pricing.json` (e.g. a future snapshot that isn't in our table yet), cost is estimated from the tier substring (`opus` / `sonnet` / `haiku`) in the name. The UI marks these as `estimated: true`. If the model name contains none of those substrings, cost is reported as null.
 
 ## First scan can be slow
 

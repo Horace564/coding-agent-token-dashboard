@@ -8,7 +8,7 @@ from pathlib import Path
 from token_dashboard.codex_scanner import scan_codex_dir
 from token_dashboard.db import (
     expensive_prompts, init_db, model_breakdown, overview_totals,
-    project_summary, recent_sessions, session_turns,
+    project_summary, recent_sessions, session_turns, skill_breakdown,
 )
 
 
@@ -232,6 +232,36 @@ class CodexScannerTests(unittest.TestCase):
         self.assertEqual(json.loads(calls[0]["tool_calls_json"])[0]["name"], "exec")
         self.assertEqual(json.loads(calls[1]["activity_json"])[0]["kind"], "compaction")
         self.assertEqual(overview_totals(self.db, source="codex")["cache_read_tokens"], 60)
+
+    def test_skill_reads_are_counted_once_per_turn_and_rescan_replaces_them(self):
+        self.path.write_text("".join([
+            _line("session_meta", "2026-11-01T00:00:00Z", {"id": "skills", "cwd": "/work/demo"}),
+            _line("turn_context", "2026-11-01T00:00:01Z", {"turn_id": "turn-1", "model": "gpt-test"}),
+            _line("response_item", "2026-11-01T00:00:02Z", {
+                "type": "custom_tool_call", "name": "exec", "call_id": "read-1",
+                "input": 'const r=await tools.exec_command({cmd:"Get-Content .codex/skills/graphify/SKILL.md"});',
+            }),
+            _line("response_item", "2026-11-01T00:00:03Z", {
+                "type": "custom_tool_call", "name": "exec", "call_id": "read-2",
+                "input": 'const r=await tools.exec_command({cmd:"Get-Content .codex/skills/graphify/SKILL.md"});',
+            }),
+            _line("response_item", "2026-11-01T00:00:04Z", {
+                "type": "custom_tool_call", "name": "exec", "call_id": "search",
+                "input": 'const r=await tools.exec_command({cmd:"rg -n SKILL.md README.md"});',
+            }),
+            _line("token_usage_record", "2026-11-01T00:00:05Z", {
+                "turn_id": "turn-1", "response_id": "response-1", "usage": _usage(100, 40, 10),
+            }),
+        ]), encoding="utf-8")
+        scan_codex_dir(self.root, self.db)
+        rows = skill_breakdown(self.db, source="codex")
+        self.assertEqual([(r["skill"], r["source"], r["invocations"]) for r in rows],
+                         [("graphify", "codex", 1)])
+        self.path.write_text(self.path.read_text(encoding="utf-8").replace(
+            "graphify/SKILL.md", "openai-docs/SKILL.md"), encoding="utf-8")
+        scan_codex_dir(self.root, self.db)
+        self.assertEqual([r["skill"] for r in skill_breakdown(self.db, source="codex")],
+                         ["openai-docs"])
 
 
 if __name__ == "__main__":

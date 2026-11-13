@@ -1,6 +1,7 @@
 """SQLite schema, connection, and shared query helpers."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -79,15 +80,17 @@ CREATE INDEX IF NOT EXISTS idx_tools_session ON tool_calls(session_id);
 CREATE INDEX IF NOT EXISTS idx_tools_name    ON tool_calls(tool_name);
 CREATE INDEX IF NOT EXISTS idx_tools_target  ON tool_calls(target);
 
-CREATE TABLE IF NOT EXISTS plan (
-  k TEXT PRIMARY KEY,
-  v TEXT
+CREATE TABLE IF NOT EXISTS codex_skill_uses (
+  source_file  TEXT NOT NULL,
+  turn_uuid    TEXT NOT NULL,
+  session_id   TEXT NOT NULL,
+  project_slug TEXT NOT NULL,
+  skill        TEXT NOT NULL,
+  timestamp    TEXT NOT NULL,
+  PRIMARY KEY (source_file, turn_uuid, skill)
 );
+CREATE INDEX IF NOT EXISTS idx_codex_skills_timestamp ON codex_skill_uses(timestamp);
 
-CREATE TABLE IF NOT EXISTS dismissed_tips (
-  tip_key       TEXT PRIMARY KEY,
-  dismissed_at  REAL NOT NULL
-);
 """
 
 
@@ -253,7 +256,7 @@ def expensive_prompts(db_path, limit: int = 50, sort: str = "tokens", source=Non
     """
     order = "u.timestamp DESC" if sort == "recent" else "total_tokens DESC"
     sql = f"""
-      SELECT u.uuid AS user_uuid, u.session_id, u.project_slug, u.timestamp,
+      SELECT u.uuid AS user_uuid, u.session_id, u.project_slug, u.source, u.timestamp,
              u.prompt_text, u.prompt_chars,
              MAX(a.uuid) AS assistant_uuid, MAX(a.model) AS model,
              COUNT(a.uuid) AS model_calls,
@@ -273,7 +276,37 @@ def expensive_prompts(db_path, limit: int = 50, sort: str = "tokens", source=Non
        LIMIT ?
     """
     with connect(db_path) as c:
-        return [dict(r) for r in c.execute(sql, (source, source, limit))]
+        rows = [dict(r) for r in c.execute(sql, (source, source, limit))]
+        if not rows:
+            return rows
+        by_uuid = {row["user_uuid"]: row for row in rows}
+        for row in rows:
+            row["tool_count"] = 0
+            row["compaction_count"] = 0
+        placeholders = ",".join("?" * len(rows))
+        activity_sql = f"""SELECT parent_uuid, activity_json, tool_calls_json
+                             FROM messages
+                            WHERE type='assistant' AND parent_uuid IN ({placeholders})"""
+        for assistant in c.execute(activity_sql, tuple(by_uuid)):
+            prompt = by_uuid[assistant["parent_uuid"]]
+            events = []
+            for raw in (assistant["activity_json"], assistant["tool_calls_json"]):
+                try:
+                    parsed = json.loads(raw or "[]")
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(parsed, list) and parsed:
+                    events = parsed
+                    break
+            prompt["tool_count"] += sum(
+                isinstance(event, dict) and event.get("kind", "tool") == "tool"
+                for event in events
+            )
+            prompt["compaction_count"] += sum(
+                isinstance(event, dict) and event.get("kind") == "compaction"
+                for event in events
+            )
+        return rows
 
 
 def project_summary(db_path, since=None, until=None, source=None) -> list:
@@ -304,25 +337,111 @@ def project_summary(db_path, since=None, until=None, source=None) -> list:
     return rows
 
 
-def tool_token_breakdown(db_path, since=None, until=None, source=None) -> list:
-    if source == "codex":
-        return []  # Codex tool-call attribution is not imported yet.
-    rng, args = _range_clause(since, until)
-    sql = f"""
-      SELECT tool_name,
-             COUNT(*) AS calls,
-             COALESCE(SUM(result_tokens),0) AS result_tokens
-        FROM tool_calls
-       WHERE tool_name != '_tool_result' {rng}
-       GROUP BY tool_name
-       ORDER BY calls DESC
-    """
+_NESTED_TOOL_CALL = re.compile(r"(?<![.\w$])tools\.([A-Za-z_]\w*)\s*\(")
+_KNOWN_NESTED_TOOLS = {
+    "exec_command", "apply_patch", "write_stdin", "view_image", "web__run",
+    "image_gen__imagegen", "clock__curr_time", "list_mcp_resources",
+    "list_mcp_resource_templates", "read_mcp_resource", "get_goal",
+    "create_goal", "update_goal",
+}
+
+
+def _exec_tool_name(event: dict) -> str:
+    """Classify one exec wrapper by tool calls visible in its JavaScript input."""
+    if event.get("input_truncated") or not isinstance(event.get("input"), str):
+        return "exec → unknown"
+    source = event["input"]
+    code = []
+    i = 0
+    while i < len(source):
+        char = source[i]
+        if char in ('"', "'", "`"):
+            quote = char
+            code.append(" ")
+            i += 1
+            while i < len(source):
+                if source[i] == "\\":
+                    i += 2
+                elif source[i] == quote:
+                    i += 1
+                    break
+                else:
+                    i += 1
+        elif source.startswith("//", i):
+            code.append(" ")
+            end = source.find("\n", i + 2)
+            i = len(source) if end < 0 else end
+        elif source.startswith("/*", i):
+            code.append(" ")
+            end = source.find("*/", i + 2)
+            i = len(source) if end < 0 else end + 2
+        else:
+            code.append(char)
+            i += 1
+    names = {
+        match.group(1) for match in _NESTED_TOOL_CALL.finditer("".join(code))
+        if match.group(1) in _KNOWN_NESTED_TOOLS or match.group(1).startswith("mcp__")
+    }
+    if len(names) > 1:
+        return "exec → mixed"
+    if not names:
+        return "exec → unknown"
+    name = names.pop()
+    return "exec → exec_command (shell)" if name == "exec_command" else f"exec → {name}"
+
+
+def tool_use_breakdown(db_path, since=None, until=None, source=None) -> list:
+    """Count recorded outer tool calls, classifying Codex exec wrappers by nested tool."""
+    result = []
     with connect(db_path) as c:
-        return [dict(r) for r in c.execute(sql, args)]
+        if source != "codex":
+            rng, args = _range_clause(since, until)
+            sql = f"""
+              SELECT 'claude' AS source, tool_name, COUNT(*) AS calls,
+                     COUNT(DISTINCT session_id) AS sessions
+                FROM tool_calls
+               WHERE tool_name != '_tool_result' {rng}
+               GROUP BY tool_name
+            """
+            result.extend(dict(row) for row in c.execute(sql, args))
+        if source != "claude":
+            rng, args = _range_clause(since, until)
+            sql = f"""
+              SELECT session_id, activity_json
+                FROM messages
+               WHERE source='codex' AND type='assistant'
+                 AND activity_json IS NOT NULL {rng}
+            """
+            codex_tools = {}
+            for row in c.execute(sql, args):
+                try:
+                    events = json.loads(row["activity_json"])
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(events, list):
+                    continue
+                for event in events:
+                    if not isinstance(event, dict) or event.get("kind") != "tool":
+                        continue
+                    name = event.get("name") or "tool"
+                    if name == "exec":
+                        name = _exec_tool_name(event)
+                    stats = codex_tools.setdefault(name, {"calls": 0, "sessions": set()})
+                    stats["calls"] += 1
+                    stats["sessions"].add(row["session_id"])
+            result.extend({
+                "source": "codex", "tool_name": name,
+                "calls": stats["calls"], "sessions": len(stats["sessions"]),
+            } for name, stats in codex_tools.items())
+    return sorted(result, key=lambda row: (-row["calls"], row["source"], row["tool_name"]))
 
 
-def recent_sessions(db_path, limit: int = 20, since=None, until=None, source=None) -> list:
+def recent_sessions(db_path, limit: int = 20, since=None, until=None, source=None,
+                    sort: str = "recent") -> list:
     rng, args = _range_clause(since, until, source=source)
+    if sort not in ("recent", "tokens"):
+        raise ValueError(f"invalid session sort: {sort}")
+    order_by = "tokens DESC, ended DESC, m.session_id" if sort == "tokens" else "ended DESC, m.session_id"
     sql = f"""
       SELECT m.session_id, project_slug, source, st.title AS session_title,
              MIN(timestamp) AS started, MAX(timestamp) AS ended,
@@ -334,11 +453,35 @@ def recent_sessions(db_path, limit: int = 20, since=None, until=None, source=Non
         LEFT JOIN session_titles st ON st.session_id = m.session_id
        WHERE 1=1 {rng}
        GROUP BY m.session_id, m.source
-       ORDER BY ended DESC
+       ORDER BY {order_by}
        LIMIT ?
     """
     with connect(db_path) as c:
         rows = [dict(r) for r in c.execute(sql, (*args, limit))]
+        for row in rows:
+            row["compaction_count"] = 0
+        if rows:
+            by_id = {row["session_id"]: row for row in rows}
+            placeholders = ",".join("?" * len(by_id))
+            activity_rng, activity_args = _range_clause(
+                since, until, col="m.timestamp", source=source,
+            )
+            activity_sql = f"""SELECT m.session_id, m.activity_json
+                                 FROM messages m
+                                WHERE m.type='assistant'
+                                  AND m.session_id IN ({placeholders})
+                                  AND m.activity_json LIKE '%compaction%'
+                                  {activity_rng}"""
+            for message in c.execute(activity_sql, (*by_id, *activity_args)):
+                try:
+                    events = json.loads(message["activity_json"] or "[]")
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(events, list):
+                    by_id[message["session_id"]]["compaction_count"] += sum(
+                        isinstance(event, dict) and event.get("kind") == "compaction"
+                        for event in events
+                    )
         # Cache per-slug name lookups so we don't query once per session.
         slug_cache = {}
         for r in rows:
@@ -409,7 +552,7 @@ def daily_token_breakdown(db_path, since=None, until=None, source=None) -> list:
 
 
 def skill_breakdown(db_path, since=None, until=None, source=None) -> list:
-    """Per-skill invocation counts, distinct sessions, last-used timestamp.
+    """Claude Skill calls and inferred Codex SKILL.md reads.
 
     Token attribution per skill is not included: in Claude Code, a Skill's
     content is loaded via a system-reminder on the next turn, not as the
@@ -419,25 +562,30 @@ def skill_breakdown(db_path, since=None, until=None, source=None) -> list:
     invocation row) could enable precise attribution; for now we only expose
     the reliable counts.
     """
-    if source == "codex":
-        return []  # Codex skill invocations are not imported yet.
-    rng, args = _range_clause(since, until)
+    rng, args = _range_clause(since, until, source=source)
     sql = f"""
-      SELECT target AS skill,
+      SELECT source, skill,
              COUNT(*) AS invocations,
              COUNT(DISTINCT session_id) AS sessions,
              MAX(timestamp) AS last_used
-        FROM tool_calls
-       WHERE tool_name = 'Skill' AND target IS NOT NULL AND target != '' {rng}
-       GROUP BY target
-       ORDER BY invocations DESC
+        FROM (
+          SELECT 'claude' AS source, target AS skill, session_id, timestamp
+            FROM tool_calls
+           WHERE tool_name = 'Skill' AND target IS NOT NULL AND target != ''
+          UNION ALL
+          SELECT 'codex' AS source, skill, session_id, timestamp
+            FROM codex_skill_uses
+        ) AS uses
+       WHERE 1=1 {rng}
+       GROUP BY source, skill
+       ORDER BY invocations DESC, skill
     """
     with connect(db_path) as c:
         return [dict(r) for r in c.execute(sql, args)]
 
 
 def model_breakdown(db_path, since=None, until=None, source=None) -> list:
-    """Per-model token totals + turn count. Caller computes cost via pricing."""
+    """Per-model token totals + turn count."""
     rng, args = _range_clause(since, until, source=source)
     sql = f"""
       SELECT source, COALESCE(model, 'unknown') AS model,

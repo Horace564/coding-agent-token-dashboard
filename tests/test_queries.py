@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -5,7 +6,7 @@ import unittest
 from token_dashboard.db import (
     init_db, connect,
     overview_totals, expensive_prompts, project_summary,
-    tool_token_breakdown, recent_sessions, session_turns,
+    tool_use_breakdown, recent_sessions, session_turns,
     daily_token_breakdown, model_breakdown, project_name_for,
     skill_breakdown,
 )
@@ -52,6 +53,23 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(rows[0]["prompt_text"], "small")
         self.assertEqual(rows[1]["prompt_text"], "big prompt")
 
+    def test_expensive_prompts_includes_activity_counts(self):
+        with connect(self.db) as c:
+            c.execute("UPDATE messages SET tool_calls_json=? WHERE uuid='a1'", (
+                '[{"name":"Read"},{"name":"Bash"}]',
+            ))
+            c.execute("""INSERT INTO messages
+                (uuid, parent_uuid, session_id, project_slug, type, timestamp,
+                 source, activity_json, input_tokens, output_tokens)
+                VALUES ('a3', 'u2', 's2', 'projB', 'assistant',
+                        '2026-04-11T00:00:02Z', 'codex', ?, 1, 1)""", (
+                '[{"kind":"tool","name":"exec"},{"kind":"compaction"}]',
+            ))
+            c.commit()
+        rows = {row["user_uuid"]: row for row in expensive_prompts(self.db, limit=10)}
+        self.assertEqual((rows["u1"]["tool_count"], rows["u1"]["compaction_count"]), (2, 0))
+        self.assertEqual((rows["u2"]["tool_count"], rows["u2"]["compaction_count"]), (1, 1))
+
     def test_project_summary_groups(self):
         rows = project_summary(self.db)
         slugs = {r["project_slug"]: r for r in rows}
@@ -59,14 +77,88 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(slugs["projA"]["turns"], 1)
 
     def test_tool_breakdown(self):
-        rows = tool_token_breakdown(self.db)
+        rows = tool_use_breakdown(self.db)
         names = {r["tool_name"]: r for r in rows}
         self.assertIn("Read", names)
         self.assertIn("Bash", names)
+        self.assertEqual((names["Read"]["source"], names["Read"]["calls"], names["Read"]["sessions"]),
+                         ("claude", 1, 1))
+
+    def test_tool_use_includes_codex_and_respects_filters(self):
+        with connect(self.db) as c:
+            c.execute("""INSERT INTO messages
+                (uuid, source, session_id, project_slug, type, timestamp, activity_json)
+                VALUES ('codex-tool', 'codex', 'codex:s', 'projC', 'assistant',
+                        '2026-04-11T00:00:02Z', ?)""", (
+                '[{"kind":"tool","name":"exec_command"},'
+                '{"kind":"tool","name":"exec_command"},'
+                '{"kind":"message","text":"done"}]',
+            ))
+            c.commit()
+        rows = tool_use_breakdown(self.db)
+        self.assertEqual([r["source"] for r in rows], ["codex", "claude", "claude"])
+        self.assertEqual(rows[0]["tool_name"], "exec_command")
+        self.assertEqual((rows[0]["calls"], rows[0]["sessions"]), (2, 1))
+        self.assertEqual([r["source"] for r in tool_use_breakdown(self.db, source="codex")], ["codex"])
+        self.assertEqual(len(tool_use_breakdown(self.db, source="claude")), 2)
+        self.assertEqual(len(tool_use_breakdown(self.db, since="2026-04-11T00:00:00Z")), 1)
+
+    def test_tool_use_classifies_exec_without_double_counting(self):
+        events = [
+            {"kind": "tool", "name": "exec", "input": "await tools.exec_command({cmd: 'ls'})"},
+            {"kind": "tool", "name": "exec", "input": "await tools.apply_patch('patch')"},
+            {"kind": "tool", "name": "exec", "input":
+             "await tools.exec_command({}); await tools.apply_patch('patch')"},
+            {"kind": "tool", "name": "exec", "input":
+             "const example = 'tools.exec_command('; await tools.apply_patch('patch')"},
+            {"kind": "tool", "name": "exec", "input":
+             "await tools.exec_command({})", "input_truncated": True},
+        ]
+        with connect(self.db) as c:
+            c.execute("""INSERT INTO messages
+                (uuid, source, session_id, project_slug, type, timestamp, activity_json)
+                VALUES ('exec-wrapper', 'codex', 'codex:split', 'projC', 'assistant',
+                        '2026-04-11T00:00:02Z', ?)""", (json.dumps(events),))
+            c.commit()
+        rows = tool_use_breakdown(self.db, source="codex")
+        counts = {row["tool_name"]: row["calls"] for row in rows}
+        self.assertEqual(counts, {
+            "exec → exec_command (shell)": 1,
+            "exec → apply_patch": 2,
+            "exec → mixed": 1,
+            "exec → unknown": 1,
+        })
+        self.assertEqual(sum(row["calls"] for row in rows), len(events))
+        self.assertTrue(all(row["sessions"] == 1 for row in rows))
 
     def test_recent_sessions(self):
         rows = recent_sessions(self.db, limit=5)
         self.assertEqual(rows[0]["session_id"], "s2")
+
+    def test_recent_sessions_orders_by_total_tokens_before_limit(self):
+        rows = recent_sessions(self.db, limit=1, sort="tokens")
+        self.assertEqual([row["session_id"] for row in rows], ["s1"])
+        self.assertEqual(rows[0]["tokens"], 600)
+
+    def test_recent_sessions_counts_compactions(self):
+        with connect(self.db) as c:
+            c.execute("UPDATE messages SET activity_json=? WHERE uuid='a1'", (
+                '[{"kind":"compaction"},{"kind":"tool"},{"kind":"compaction"}]',
+            ))
+            c.execute("""INSERT INTO messages
+                (uuid, parent_uuid, session_id, project_slug, type, timestamp, activity_json)
+                VALUES ('a3', 'u1', 's1', 'projA', 'assistant',
+                        '2026-04-10T00:00:02Z', ?)""", (
+                '[{"kind":"compaction"}]',
+            ))
+            c.commit()
+        rows = {row["session_id"]: row for row in recent_sessions(self.db, limit=5)}
+        self.assertEqual(rows["s1"]["compaction_count"], 3)
+        self.assertEqual(rows["s2"]["compaction_count"], 0)
+        filtered = {row["session_id"]: row for row in recent_sessions(
+            self.db, limit=5, since="2026-04-10T00:00:02Z",
+        )}
+        self.assertEqual(filtered["s1"]["compaction_count"], 1)
 
     def test_session_turns(self):
         rows = session_turns(self.db, "s1")

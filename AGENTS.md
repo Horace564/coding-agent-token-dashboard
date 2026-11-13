@@ -1,6 +1,6 @@
 ## graphify
 
-This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+Local development may generate a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships. The directory is ignored by Git and is not required by the dashboard.
 
 When the user types `/graphify`, use the installed graphify skill or instructions before doing anything else.
 
@@ -9,5 +9,5 @@ Rules:
 - Dirty graphify-out/ files are expected after hooks or incremental updates; dirty graph files are not a reason to skip graphify. Only skip graphify if the task is about stale or incorrect graph output, or the user explicitly says not to use it.
 - If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
-- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
-- A committed graphify-out/graph.json is rewritten whole on every build, so a large diff to it in a pull request is expected. Do not flag it as churn or suggest skipping the graph rebuild or its hooks.
+- When graphify-out/graph.json exists, run `graphify update .` after modifying code to keep the local graph current (AST-only, no API cost).
+- Keep graphify-out/ local. Continue rebuilding the graph after code changes when it exists; its generated files should not appear in pull requests.
