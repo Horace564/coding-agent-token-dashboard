@@ -27,6 +27,18 @@ class InitDbTests(unittest.TestCase):
             r = c.execute("SELECT 1 AS one").fetchone()
         self.assertEqual(r["one"], 1)
 
+    def test_existing_claude_rows_get_source_fields(self):
+        with sqlite3.connect(self.db_path) as c:
+            c.execute("""CREATE TABLE messages (
+                uuid TEXT PRIMARY KEY, session_id TEXT, project_slug TEXT,
+                timestamp TEXT, model TEXT, type TEXT, message_id TEXT
+            )""")
+            c.execute("INSERT INTO messages VALUES ('u','s','p','2026-01-01','claude-test','user',NULL)")
+        init_db(self.db_path)
+        with sqlite3.connect(self.db_path) as c:
+            row = c.execute("SELECT source, cache_write_tokens, reasoning_output_tokens FROM messages WHERE uuid='u'").fetchone()
+        self.assertEqual(row, ("claude", 0, 0))
+
 
 if __name__ == "__main__":
     unittest.main()

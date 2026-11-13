@@ -7,7 +7,7 @@ export default async function (root) {
     <div class="card">
       <h2>Settings</h2>
       <h3 style="margin-top:16px">Plan</h3>
-      <p class="muted" style="margin:0 0 12px">Sets how cost is displayed. API mode shows pay-per-token rates. Subscription modes show what you actually pay each month.</p>
+      <p class="muted" style="margin:0 0 12px">Claude Code API-equivalent cost only. Codex usage is shown in tokens without a dollar estimate.</p>
       <div class="flex">
         <select id="plan">
           ${plans.map(([k,v]) => `<option value="${k}" ${k===cur.plan?'selected':''}>${v.label}${v.monthly?` — $${v.monthly}/mo`:''}</option>`).join('')}

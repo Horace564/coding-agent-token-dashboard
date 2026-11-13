@@ -1,5 +1,9 @@
 # Known Limitations
 
+## Codex imports local usage only
+
+The Codex importer reads local rollout JSONL under `$CODEX_HOME/sessions`. Cloud sessions or other devices are not included. Codex's rollout format is not a stable public API. The dashboard imports token counts, model, project, session names, and user prompts, but currently leaves Codex tools, skills, tips, and dollar cost unavailable. Changed Codex files are reparsed in full so per-response and cumulative records cannot be counted twice.
+
 None of these are blockers — the dashboard still gives you useful information. They're the rough edges you'll notice if you look hard.
 
 ## Skills token counts are partial
@@ -22,7 +26,7 @@ If a transcript references a model ID not in `pricing.json` (e.g. a future snaps
 
 ## First scan can be slow
 
-The first `python3 cli.py scan` on a heavy user's machine can read tens of MB across hundreds of JSONLs. Subsequent scans are incremental (mtime + byte-offset tracking in the `files` table), so they're fast.
+The first `python3 cli.py scan` on a heavy user's machine can read tens of MB across hundreds of JSONLs. Claude scans then use byte offsets; Codex scans skip unchanged files and reparse changed files in full.
 
 ## Running two dashboards against the same DB
 

@@ -45,7 +45,8 @@ export default async function (root) {
 
   const cacheCreate =
     (totals.cache_create_5m_tokens || 0) +
-    (totals.cache_create_1h_tokens || 0);
+    (totals.cache_create_1h_tokens || 0) +
+    (totals.cache_write_tokens || 0);
 
   const kpi = (label, compactVal, fullVal, cls = '') => `
     <div class="card kpi ${cls}">
@@ -69,39 +70,39 @@ export default async function (root) {
     <div class="row cols-7">
       ${kpi('Sessions',     fmt.int(totals.sessions),       fmt.int(totals.sessions))}
       ${kpi('Turns',        fmt.int(totals.turns),          fmt.int(totals.turns))}
-      ${kpi('Input',        fmt.compact(totals.input_tokens),       fmt.int(totals.input_tokens) + ' tokens')}
+      ${kpi('Fresh input',  fmt.compact(totals.input_tokens),       fmt.int(totals.input_tokens) + ' tokens')}
       ${kpi('Output',       fmt.compact(totals.output_tokens),      fmt.int(totals.output_tokens) + ' tokens')}
       ${kpi('Cache read',   fmt.compact(totals.cache_read_tokens),  fmt.int(totals.cache_read_tokens) + ' tokens')}
       ${kpi('Cache create', fmt.compact(cacheCreate),               fmt.int(cacheCreate) + ' tokens')}
       <div class="card kpi cost">
-        <div class="label">Est. cost</div>
+        <div class="label">Claude API est.</div>
         <div class="value" title="${fmt.usd(totals.cost_usd)}">${fmt.usd(totals.cost_usd)}</div>
-        ${planSubtitle()}
+        ${totals.cost_partial ? '<div class="sub">Codex not included</div>' : planSubtitle()}
       </div>
     </div>
 
     <details class="card glossary" style="margin-top:16px">
       <summary><h3 style="display:inline-block;margin:0">What do these numbers mean?</h3><span class="muted" style="font-size:12px">— click to expand</span></summary>
       <dl>
-        <dt>Session</dt><dd>One run of Claude Code (from <code>claude</code> to exit). Each session is a single <code>.jsonl</code> file.</dd>
-        <dt>Turn</dt><dd>One message you sent to Claude. Each turn triggers a response (possibly with tool calls in between).</dd>
-        <dt>Input tokens</dt><dd>The new text you (and tool results) sent to Claude this turn. Billed at the full input rate.</dd>
-        <dt>Output tokens</dt><dd>The text Claude wrote back. Billed at the highest rate — usually the biggest cost driver per turn.</dd>
-        <dt>Cache read</dt><dd>Tokens Claude re-used from a cache (your CLAUDE.md, previously-read files, the conversation so far). ~10× cheaper than fresh input. High cache-read counts = good cost hygiene.</dd>
-        <dt>Cache create</dt><dd>Writing something into the cache for the first time. One-time cost; pays off on the next turn.</dd>
-        <dt>Billable tokens</dt><dd>Input + Output + Cache create. Cache reads are billed separately (and much cheaper).</dd>
+        <dt>Session</dt><dd>One local Claude Code or Codex conversation.</dd>
+        <dt>Turn</dt><dd>One user turn in a session. Codex turns are inferred from local usage records.</dd>
+        <dt>Fresh input</dt><dd>Input tokens excluding cache reads and cache writes.</dd>
+        <dt>Output tokens</dt><dd>Generated tokens, including reasoning tokens reported by Codex.</dd>
+        <dt>Cache read</dt><dd>Input tokens reused from a prompt cache.</dd>
+        <dt>Cache create</dt><dd>Input tokens written to cache. Claude and Codex report different cache details.</dd>
+        <dt>Cost</dt><dd>The dollar estimate covers Claude Code only. Codex subscription usage is shown as tokens, not a bill.</dd>
       </dl>
     </details>
 
     <div class="row cols-2" style="margin-top:16px">
       <div class="card">
         <h3>Your daily work</h3>
-        <p class="muted" style="margin:-4px 0 10px;font-size:12px">Tokens you paid for: what you sent (<b>input</b>), what Claude wrote (<b>output</b>), and what got stored for re-use (<b>cache create</b>).</p>
+        <p class="muted" style="margin:-4px 0 10px;font-size:12px">Fresh input, output and cache writes across the selected source.</p>
         <div id="ch-daily-billable" style="height:260px"></div>
       </div>
       <div class="card">
         <h3>Daily cache reads</h3>
-        <p class="muted" style="margin:-4px 0 10px;font-size:12px"><b>Cache reads</b> are cheap re-uses of things Claude already saw (like your CLAUDE.md). They cost ~10× less than regular input tokens — high numbers here are a good thing.</p>
+        <p class="muted" style="margin:-4px 0 10px;font-size:12px">Input tokens reused from cache.</p>
         <div id="ch-daily-cache" style="height:260px"></div>
       </div>
     </div>
@@ -110,22 +111,22 @@ export default async function (root) {
       <div class="card"><h3>Tokens by project</h3><div id="ch-projects" style="height:320px"></div></div>
       <div class="card">
         <h3>Token usage by model</h3>
-        <p class="muted" style="margin:-4px 0 4px;font-size:12px">Share of billable tokens per Claude model.</p>
+        <p class="muted" style="margin:-4px 0 4px;font-size:12px">Share of processed tokens per model and source.</p>
         <div id="ch-model" style="height:300px"></div>
       </div>
     </div>
 
     <div class="row cols-2" style="margin-top:16px">
-      <div class="card"><h3>Top tools (by call count)</h3><div id="ch-tools" style="height:320px"></div></div>
+      <div class="card"><h3>Claude tools (by call count)</h3><div id="ch-tools" style="height:320px"></div></div>
       <div class="card">
         <h3 style="display:flex;align-items:center"><span>Recent sessions</span><span class="spacer"></span><a href="#/sessions" style="font-weight:400;font-size:12px">all →</a></h3>
         <table>
-          <thead><tr><th>started</th><th>project</th><th class="num">tokens</th></tr></thead>
+          <thead><tr><th>started</th><th>session</th><th class="num">tokens</th></tr></thead>
           <tbody>
             ${sessions.map(s => `
               <tr>
                 <td class="mono">${fmt.ts(s.started)}</td>
-                <td><a href="#/sessions/${encodeURIComponent(s.session_id)}">${fmt.htmlSafe(s.project_name || s.project_slug)}</a></td>
+                <td><a href="#/sessions/${encodeURIComponent(s.session_id)}">${fmt.htmlSafe(s.session_title || `Session ${s.session_id.replace(/^codex:/, '').slice(0, 8)}`)}</a> <span class="badge">${fmt.htmlSafe(s.source)}</span></td>
                 <td class="num">${fmt.compact(s.tokens)}</td>
               </tr>`).join('') || '<tr><td colspan="3" class="muted">no sessions in this range</td></tr>'}
           </tbody>
@@ -160,8 +161,9 @@ export default async function (root) {
   // by-model doughnut
   donutChart(document.getElementById('ch-model'),
     byModel.map(m => ({
-      name: fmt.modelShort(m.model) || 'unknown',
+      name: `${m.source}: ${fmt.modelShort(m.model) || 'unknown'}`,
       value: (m.input_tokens || 0) + (m.output_tokens || 0)
+           + (m.cache_read_tokens || 0) + (m.cache_write_tokens || 0)
            + (m.cache_create_5m_tokens || 0) + (m.cache_create_1h_tokens || 0),
     })).filter(d => d.value > 0),
   );

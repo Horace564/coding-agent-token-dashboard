@@ -24,12 +24,15 @@ export const fmt = {
 };
 
 export async function api(path, opts) {
-  const r = await fetch(path, opts);
+  const url = !opts && path.startsWith('/api/') && state.source !== 'all'
+    ? path + (path.includes('?') ? '&' : '?') + 'source=' + encodeURIComponent(state.source)
+    : path;
+  const r = await fetch(url, opts);
   if (!r.ok) throw new Error(`${path} → ${r.status}`);
   return r.json();
 }
 
-export const state = { plan: 'api', pricing: null };
+export const state = { plan: 'api', pricing: null, source: localStorage.getItem('td.source') || 'all' };
 
 const ROUTES = {
   '/overview': () => import('/web/routes/overview.js'),
@@ -50,6 +53,11 @@ function buildTopbar() {
       ${Object.keys(ROUTES).map(p => `<a href="#${p}" data-route="${p}">${p.slice(1)}</a>`).join('')}
     </nav>
     <div class="spacer"></div>
+    <select id="source-filter" aria-label="Usage source">
+      <option value="all">All sources</option>
+      <option value="claude">Claude Code</option>
+      <option value="codex">Codex</option>
+    </select>
     <span class="pill" id="plan-pill">api</span>
     <span class="pill muted" title="Cmd/Ctrl+B blurs sensitive text">⌘B blur</span>
   `;
@@ -106,6 +114,13 @@ async function firstRun() {
 
 async function boot() {
   buildTopbar();
+  if (!['all', 'claude', 'codex'].includes(state.source)) state.source = 'all';
+  $('#source-filter').value = state.source;
+  $('#source-filter').addEventListener('change', e => {
+    state.source = e.target.value;
+    localStorage.setItem('td.source', state.source);
+    render();
+  });
   const planResp = await api('/api/plan');
   state.plan = planResp.plan;
   state.pricing = planResp.pricing;

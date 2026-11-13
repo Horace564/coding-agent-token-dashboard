@@ -49,6 +49,26 @@ class ServerTests(unittest.TestCase):
         self.assertIn("sessions", body)
         self.assertEqual(body["sessions"], 1)
 
+    def test_source_filter_and_codex_cost(self):
+        with sqlite3.connect(self.db) as c:
+            c.execute("""INSERT INTO messages
+                (uuid, source, session_id, project_slug, type, timestamp, model,
+                 input_tokens, output_tokens, cache_read_tokens)
+                VALUES ('c', 'codex', 'codex:z', 'p2', 'assistant',
+                        '2026-04-19T00:00:02Z', 'gpt-test', 6, 2, 4)""")
+        claude = json.loads(self._get("/api/overview?source=claude"))
+        codex = json.loads(self._get("/api/overview?source=codex"))
+        combined = json.loads(self._get("/api/overview"))
+        self.assertEqual(claude["sessions"], 1)
+        self.assertEqual(codex["sessions"], 1)
+        self.assertEqual(codex["input_tokens"], 6)
+        self.assertIsNone(codex["cost_usd"])
+        self.assertEqual(combined["sessions"], 2)
+        self.assertTrue(combined["cost_partial"])
+        self.assertEqual(json.loads(self._get("/api/projects?source=codex"))[0]["source"], "codex")
+        turns = json.loads(self._get("/api/sessions/codex%3Az"))
+        self.assertEqual(turns[0]["source"], "codex")
+
     def test_prompts_json(self):
         body = json.loads(self._get("/api/prompts?limit=10"))
         self.assertIsInstance(body, list)

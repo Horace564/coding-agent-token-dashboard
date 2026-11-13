@@ -1,10 +1,11 @@
-import { api, fmt } from '/web/app.js';
+import { api, fmt, state } from '/web/app.js';
 
 export default async function (root) {
   const tips = await api('/api/tips');
   root.innerHTML = `
     <div class="card">
       <h2>Suggestions</h2>
+      <p class="muted">${state.source === 'codex' ? 'Codex suggestions are not available yet. Select Claude Code or All sources.' : 'Suggestions currently use Claude Code records only.'}</p>
       ${tips.length === 0
         ? '<p class="muted">No suggestions right now. Token Dashboard surfaces patterns weekly — check back after more activity.</p>'
         : `<p class="muted" style="margin:-8px 0 14px">Rule-based pattern detection over the last 7 days. Dismissed tips re-appear after 14 days.</p>`}

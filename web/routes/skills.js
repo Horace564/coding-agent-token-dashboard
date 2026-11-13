@@ -1,4 +1,4 @@
-import { api, fmt } from '/web/app.js';
+import { api, fmt, state } from '/web/app.js';
 import { barChart } from '/web/charts.js';
 
 const RANGES = [
@@ -42,6 +42,7 @@ export default async function (root) {
   root.innerHTML = `
     <div class="flex" style="margin-bottom:14px">
       <h2 style="margin:0;font-size:16px;letter-spacing:-0.01em">Skills</h2>
+      <span class="muted" style="font-size:12px">${state.source === 'codex' ? 'Codex skill usage is not available yet' : 'Claude Code skills'}</span>
       <span class="muted" style="font-size:12px">${range.days ? `last ${range.days} days` : 'all time'}</span>
       <div class="spacer"></div>
       ${rangeTabs}

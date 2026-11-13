@@ -42,7 +42,7 @@ def cache_discipline_tips(db_path, today_iso: Optional[str] = None) -> List[dict
              SUM(cache_read_tokens) AS cr,
              SUM(input_tokens + cache_create_5m_tokens + cache_create_1h_tokens) AS rebuild
         FROM messages
-       WHERE type='assistant' AND timestamp >= ?
+       WHERE type='assistant' AND source='claude' AND timestamp >= ?
        GROUP BY project_slug
        HAVING (cr + rebuild) > 100000
     """
@@ -113,7 +113,7 @@ def right_size_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
              SUM(input_tokens+cache_create_5m_tokens+cache_create_1h_tokens) AS in_tok,
              SUM(output_tokens) AS out_tok
         FROM messages
-       WHERE type='assistant' AND model LIKE '%opus%'
+       WHERE type='assistant' AND source='claude' AND model LIKE '%opus%'
          AND output_tokens < 500 AND is_sidechain = 0
          AND timestamp >= ?
     """
@@ -161,7 +161,7 @@ def outlier_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
                  AVG(input_tokens+output_tokens) AS mean_t,
                  MAX(input_tokens+output_tokens) AS max_t
             FROM messages
-           WHERE is_sidechain=1 AND agent_id IS NOT NULL AND timestamp >= ?
+           WHERE source='claude' AND is_sidechain=1 AND agent_id IS NOT NULL AND timestamp >= ?
            GROUP BY agent_id HAVING n >= 10
         """, (since,)):
             if (row["max_t"] or 0) > 6 * (row["mean_t"] or 1) and (row["max_t"] or 0) > 50_000:

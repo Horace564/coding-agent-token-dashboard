@@ -16,9 +16,11 @@ class CliTests(unittest.TestCase):
             f.write('{"type":"user","uuid":"u1","sessionId":"s1","timestamp":"2026-04-19T00:00:00Z","isSidechain":false,"message":{"role":"user","content":"hi"}}\n')
             f.write('{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"s1","timestamp":"2026-04-19T00:00:01Z","isSidechain":false,"message":{"model":"claude-haiku-4-5","usage":{"input_tokens":1,"output_tokens":1}}}\n')
         self.db = os.path.join(self.tmp, "t.db")
+        self.codex = os.path.join(self.tmp, "codex-sessions")
+        os.makedirs(self.codex)
 
     def _run(self, *args):
-        env = {**os.environ, "TOKEN_DASHBOARD_DB": self.db}
+        env = {**os.environ, "TOKEN_DASHBOARD_DB": self.db, "CODEX_SESSIONS_DIR": self.codex}
         return subprocess.run(
             [sys.executable, "cli.py", *args],
             cwd=ROOT, env=env, capture_output=True, text=True,

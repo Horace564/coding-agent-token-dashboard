@@ -9,6 +9,7 @@ from pathlib import Path
 
 from token_dashboard.db import init_db, default_db_path, overview_totals
 from token_dashboard.scanner import scan_dir
+from token_dashboard.codex_scanner import default_codex_sessions_dir, scan_codex_dir
 from token_dashboard.tips import all_tips
 
 
@@ -24,6 +25,10 @@ def _projects(args) -> str:
     )
 
 
+def _codex_sessions(args) -> str:
+    return args.codex_dir or os.environ.get("CODEX_SESSIONS_DIR") or str(default_codex_sessions_dir())
+
+
 def _today_range():
     now = datetime.now(timezone.utc)
     start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc).isoformat()
@@ -35,14 +40,16 @@ def cmd_scan(args):
     db = _db_path(args)
     init_db(db)
     n = scan_dir(_projects(args), db)
-    print(f"Token Dashboard: scanned {n['files']} files, {n['messages']} messages, {n['tools']} tool calls")
+    codex = scan_codex_dir(_codex_sessions(args), db)
+    print(f"Token Dashboard: Claude scanned {n['files']} files, {n['messages']} messages, {n['tools']} tool calls")
+    print(f"Token Dashboard: Codex scanned {codex['files']} files, {codex['messages']} responses, {codex['turns']} turns")
 
 
 def cmd_today(args):
     db = _db_path(args)
     init_db(db)
     s, e = _today_range()
-    t = overview_totals(db, since=s, until=e)
+    t = overview_totals(db, since=s, until=e, source=None if args.source == "all" else args.source)
     print("Token Dashboard — today")
     print(f"  sessions: {t['sessions']}    turns: {t['turns']}")
     print(f"  input:    {t['input_tokens']:>12,}    output: {t['output_tokens']:>12,}")
@@ -52,7 +59,7 @@ def cmd_today(args):
 def cmd_stats(args):
     db = _db_path(args)
     init_db(db)
-    t = overview_totals(db)
+    t = overview_totals(db, source=None if args.source == "all" else args.source)
     print("Token Dashboard — all time")
     print(f"  sessions: {t['sessions']}    turns: {t['turns']}")
     print(f"  input:    {t['input_tokens']:>12,}    output: {t['output_tokens']:>12,}")
@@ -75,6 +82,7 @@ def cmd_dashboard(args):
     init_db(db)
     if not args.no_scan:
         scan_dir(_projects(args), db)
+        scan_codex_dir(_codex_sessions(args), db)
     from token_dashboard.server import run
 
     host = os.environ.get("HOST", "127.0.0.1")
@@ -83,15 +91,17 @@ def cmd_dashboard(args):
     if not args.no_open:
         webbrowser.open(url)
     print(f"Token Dashboard listening on {url}")
-    run(host, port, db, _projects(args))
+    run(host, port, db, _projects(args), _codex_sessions(args))
 
 
 def main():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--db", help="SQLite path (default ~/.claude/token-dashboard.db)")
     common.add_argument("--projects-dir", help="JSONL root (default ~/.claude/projects)")
+    common.add_argument("--codex-dir", help="Codex rollout root (default $CODEX_HOME/sessions or ~/.codex/sessions)")
+    common.add_argument("--source", choices=("all", "claude", "codex"), default="all", help="Usage source for today/stats")
 
-    p = argparse.ArgumentParser(prog="token-dashboard", description="Local Claude Code usage dashboard", parents=[common])
+    p = argparse.ArgumentParser(prog="token-dashboard", description="Local Claude Code and Codex usage dashboard", parents=[common])
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("scan",  parents=[common]).set_defaults(func=cmd_scan)
     sub.add_parser("today", parents=[common]).set_defaults(func=cmd_today)

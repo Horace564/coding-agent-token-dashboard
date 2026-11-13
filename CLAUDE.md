@@ -4,23 +4,25 @@ Guidance for Claude Code when working in this repository.
 
 ## Project overview
 
-**Token Dashboard** — a local dashboard for tracking Claude Code token usage, costs, and session history. Reads the JSONL transcripts Claude Code writes to `~/.claude/projects/` and turns them into per-prompt cost analytics, tool/file heatmaps, subagent attribution, cache analytics, project comparisons, and a rule-based tips engine.
+**Token Dashboard** — a local dashboard for Claude Code and Codex token usage, prompts, and session history. Claude Code also provides tool, skill, and tips analytics. Codex imports user prompts but not assistant or tool output.
 
 Inspired by [phuryn/claude-usage](https://github.com/phuryn/claude-usage) but diverges in UI (vanilla JS + ECharts, dark theme, hash router, SSE refresh) and scope (expensive-prompt drill-down, skills view, tips engine, streaming-snapshot dedup). See `docs/inspiration.md` for the original's feature set and known limitations.
 
 ## Status
 
-Working codebase. 68 Python unit tests (`python3 -m unittest discover tests`). Seven UI tabs wired up (Overview, Prompts, Sessions, Projects, Skills, Tips, Settings). Runs on macOS, Windows, and Linux.
+Working codebase. Python unit tests run with `python3 -m unittest discover tests`. Seven UI tabs wired up (Overview, Prompts, Sessions, Projects, Skills, Tips, Settings). Runs on macOS, Windows, and Linux.
 
 ## Architecture
 
-- `cli.py` → `token_dashboard/scanner.py` → `~/.claude/token-dashboard.db` (SQLite)
+- `cli.py` → `token_dashboard/scanner.py` and `token_dashboard/codex_scanner.py` → `~/.claude/token-dashboard.db` (SQLite)
 - `token_dashboard/server.py` exposes JSON APIs (`/api/*`) + SSE stream (`/api/stream`) + static frontend (`web/`)
 - `web/` is vanilla JS, no build step — hash router + ECharts
 
 ## Data source
 
 Claude Code writes one JSONL file per session to `~/.claude/projects/<project-slug>/<session-id>.jsonl`. Each line is a message record; usage fields live at `message.usage` and model identifier at `message.model`. The scanner is incremental — it tracks each file's mtime and byte offset in the `files` table and only reads new bytes on subsequent scans.
+
+Codex rollout files are read from `$CODEX_HOME/sessions` (default `~/.codex/sessions`). The Codex adapter prefers per-response `token_usage_record` data and falls back to legacy `event_msg.token_count` snapshots. It imports user prompts from message records, reads session names from the local index or state database, and rescans changed rollout files. Its on-disk format is not a stable public API.
 
 ## Conventions
 
@@ -32,7 +34,7 @@ Claude Code writes one JSONL file per session to `~/.claude/projects/<project-sl
 
 ## Customizing
 
-Env vars: `PORT` (default 8080), `HOST` (default 127.0.0.1), `CLAUDE_PROJECTS_DIR`, `TOKEN_DASHBOARD_DB`. Pricing lives in `pricing.json`. See README.md § Environment variables for details.
+Env vars: `PORT` (default 8080), `HOST` (default 127.0.0.1), `CLAUDE_PROJECTS_DIR`, `CODEX_HOME`, `CODEX_SESSIONS_DIR`, `TOKEN_DASHBOARD_DB`. Claude pricing lives in `pricing.json`. See README.md § Environment variables for details.
 
 ## Known limitations
 

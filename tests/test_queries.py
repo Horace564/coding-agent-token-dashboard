@@ -43,6 +43,9 @@ class QueryTests(unittest.TestCase):
         rows = expensive_prompts(self.db, limit=10)
         self.assertGreaterEqual(len(rows), 2)
         self.assertEqual(rows[0]["prompt_text"], "big prompt")
+        self.assertEqual(rows[0]["total_tokens"], 600)
+        self.assertEqual(rows[0]["billable_tokens"], 300)
+        self.assertEqual(rows[0]["model_calls"], 1)
 
     def test_expensive_prompts_sort_recent(self):
         rows = expensive_prompts(self.db, limit=10, sort="recent")
